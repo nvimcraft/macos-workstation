@@ -1,6 +1,7 @@
 # macOS Workstation
 
 Opinionated, repeatable setup for my personal macOS development workstation.
+It prioritizes reproducibility and reversibility over completeness.
 
 This repository exists to answer a single question:
 
@@ -30,5 +31,4 @@ macos-workstation/
 └── README.md
 ```
 
-> **NOTE** This repository is intentionally tailored to my workflow but designed
-> to be portable across machines.
+> **NOTE** This repository is tailored to my workflow but designed to be portable.
