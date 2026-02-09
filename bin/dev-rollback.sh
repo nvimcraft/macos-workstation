@@ -4,13 +4,13 @@
 
 set -euo pipefail
 
-readonly BOLD='\033[1m'
-readonly DIM='\033[2m'
-readonly GREEN='\033[32m'
-readonly BLUE='\033[34m'
-readonly YELLOW='\033[33m'
-readonly RED='\033[31m'
-readonly NC='\033[0m'
+readonly BOLD=$'\033[1m'
+readonly DIM=$'\033[2m'
+readonly GREEN=$'\033[32m'
+readonly BLUE=$'\033[34m'
+readonly YELLOW=$'\033[33m'
+readonly RED=$'\033[31m'
+readonly NC=$'\033[0m'
 
 readonly DOTFILES_DIRECTORY="$HOME/dotfiles-macos"
 

@@ -4,11 +4,11 @@
 
 set -euo pipefail
 
-readonly BOLD='\033[1m'
-readonly DIM='\033[2m'
-readonly GREEN='\033[32m'
-readonly BLUE='\033[34m'
-readonly NC='\033[0m'
+readonly BOLD=$'\033[1m'
+readonly DIM=$'\033[2m'
+readonly GREEN=$'\033[32m'
+readonly BLUE=$'\033[34m'
+readonly NC=$'\033[0m'
 
 SPINNER_PID=""
 PACKAGES_UPDATED=0
