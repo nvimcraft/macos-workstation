@@ -10,7 +10,7 @@ This repository exists to answer a single question:
 ## Bootstrap
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/nvimcraft/dotfiles-macos/main/scripts/dev-bootstrap.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/nvimcraft/macos-workstation/main/bin/dev-bootstrap.sh)"
 ```
 
 ## Repository Layout
