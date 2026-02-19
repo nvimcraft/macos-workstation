@@ -5,12 +5,18 @@
 # Exit on error, unset variables, or failed pipelines.
 set -euo pipefail
 
+# Enable DEBUG mode if set
+if [[ "${DEBUG:-0}" == "1" ]]; then
+  set -x
+fi
+
 # Output formatting
 readonly BOLD=$'\033[1m'
-readonly DIM='$\033[2m'
+readonly DIM=$'\033[2m'
 readonly GREEN=$'\033[32m'
 readonly BLUE=$'\033[34m'
 readonly YELLOW=$'\033[33m'
+readonly RED=$'\033[31m'
 readonly NC=$'\033[0m'
 
 # Target directory for dotfiles repository
@@ -71,6 +77,10 @@ log_skip() {
   printf "${YELLOW}○${NC} %s\n" "$1"
 }
 
+log_error() {
+  printf "${RED}✗${NC} %s\n" "$1"
+}
+
 log_muted() {
   printf "${DIM}%s${NC}\n" "$1"
 }
@@ -82,6 +92,26 @@ handle_exit() {
 }
 
 trap handle_exit EXIT INT TERM
+
+# Validate system prerequisites before installation
+validate_prerequisites() {
+  log_step "Validating system prerequisites"
+
+  # Check if home directory is writable
+  if [[ ! -w "$HOME" ]]; then
+    log_error "Home directory is not writable: $HOME"
+    return 1
+  fi
+
+  # Check if curl is available (required for Homebrew installation)
+  if ! command -v curl &>/dev/null; then
+    log_error "curl is required but not found. Please install curl first."
+    return 1
+  fi
+
+  log_success "System prerequisites validated"
+  return 0
+}
 
 # System prerequisites
 
@@ -182,22 +212,25 @@ install_command_line_packages() {
   log_step "Installing command line packages via Homebrew"
   start_spinner "Installing CLI tools and development utilities"
 
-  local packages_installed=0
+  local packages_to_install=()
 
+  # Collect packages that need to be installed
   for package_name in "${cli_package_names[@]}"; do
-    # Skip already-installed packages
     if ! brew list "$package_name" >/dev/null 2>&1; then
-      brew install "$package_name" >/dev/null 2>&1
-      ((packages_installed++))
+      packages_to_install+=("$package_name")
     fi
   done
 
   stop_spinner
 
-  if [[ $packages_installed -eq 0 ]]; then
-    log_skip "All command line packages already installed"
+  # Install all missing packages at once for efficiency
+  if [[ ${#packages_to_install[@]} -gt 0 ]]; then
+    start_spinner "Installing ${#packages_to_install[@]} CLI tools"
+    brew install "${packages_to_install[@]}" >/dev/null 2>&1
+    stop_spinner
+    log_success "Installed ${#packages_to_install[@]} command line packages"
   else
-    log_success "Installed $packages_installed command line packages"
+    log_skip "All command line packages already installed"
   fi
 }
 
@@ -210,22 +243,25 @@ install_nerd_fonts() {
   log_step "Installing Nerd Fonts for terminal"
   start_spinner "Installing programming fonts with icon support"
 
-  local fonts_installed=0
+  local fonts_to_install=()
 
+  # Collect fonts that need to be installed
   for font_name in "${nerd_font_names[@]}"; do
-    # Fonts are installed as Homebrew casks
     if ! brew list --cask "$font_name" >/dev/null 2>&1; then
-      brew install --cask "$font_name" >/dev/null 2>&1
-      ((fonts_installed++))
+      fonts_to_install+=("$font_name")
     fi
   done
 
   stop_spinner
 
-  if [[ $fonts_installed -eq 0 ]]; then
-    log_skip "All Nerd Fonts already installed"
+  # Install all missing fonts at once for efficiency
+  if [[ ${#fonts_to_install[@]} -gt 0 ]]; then
+    start_spinner "Installing ${#fonts_to_install[@]} Nerd Fonts"
+    brew install --cask "${fonts_to_install[@]}" >/dev/null 2>&1
+    stop_spinner
+    log_success "Installed ${#fonts_to_install[@]} Nerd Fonts"
   else
-    log_success "Installed $fonts_installed Nerd Fonts"
+    log_skip "All Nerd Fonts already installed"
   fi
 }
 
@@ -245,12 +281,12 @@ clone_dotfiles_repository() {
 
   # Skip cloning if target directory exists and points to the correct repo
   if [[ -d "$DOTFILES_DIRECTORY" ]] && [[ -d "$DOTFILES_DIRECTORY/.git" ]]; then
-    pushd "$DOTFILES_DIRECTORY" >/dev/null
+    pushd "$DOTFILES_DIRECTORY" >/dev/null 2>&1 || return
 
     local existing_remote
     existing_remote="$(git remote get-url origin 2>/dev/null || echo "")"
 
-    popd >/dev/null
+    popd >/dev/null 2>&1 || return
 
     if [[ "$existing_remote" == *"$DOTFILES_REPOSITORY_URL"* ]] ||
       [[ "$existing_remote" == *"$DOTFILES_REPO"* ]]; then
@@ -272,7 +308,7 @@ clone_dotfiles_repository() {
     log_success "Successfully cloned dotfiles-macos repository"
   else
     stop_spinner
-    log_muted "Error: Failed to clone dotfiles-macos repository"
+    log_error "Failed to clone dotfiles-macos repository"
     exit 1
   fi
 }
@@ -280,16 +316,16 @@ clone_dotfiles_repository() {
 # Dotfiles linking using GNU Stow
 link_dotfiles_with_stow() {
   if [[ ! -d "$DOTFILES_DIRECTORY" ]]; then
-    log_muted "Error: dotfiles-macos directory not found at $DOTFILES_DIRECTORY"
+    log_error "dotfiles-macos directory not found at $DOTFILES_DIRECTORY"
     exit 1
   fi
 
   log_step "Linking dotfiles-macos configuration files"
   start_spinner "Creating symbolic links for configuration files"
 
-  pushd "$DOTFILES_DIRECTORY" >/dev/null
-  stow . >/dev/null 2>&1
-  popd >/dev/null
+  pushd "$DOTFILES_DIRECTORY" >/dev/null 2>&1 || exit 1
+  stow . >/dev/null 2>&1 || true
+  popd >/dev/null 2>&1 || exit 1
 
   stop_spinner
   log_success "Successfully linked dotfiles-macos configuration files"
@@ -297,7 +333,7 @@ link_dotfiles_with_stow() {
   # Refresh bat cache if present
   if command -v bat &>/dev/null; then
     start_spinner "Rebuilding bat syntax highlighting cache"
-    bat cache --build >/dev/null 2>&1
+    bat cache --build >/dev/null 2>&1 || true
     stop_spinner
     log_success "Successfully rebuilt bat cache"
   fi
@@ -315,7 +351,7 @@ make_scripts_executable() {
   log_step "Making dotfiles-macos scripts executable"
   start_spinner "Setting execute permissions on shell scripts"
 
-  chmod +x "$scripts_directory"/*.sh 2>/dev/null
+  chmod +x "$scripts_directory"/*.sh 2>/dev/null || true
 
   stop_spinner
   log_success "Successfully made dotfiles-macos scripts executable"
@@ -331,6 +367,13 @@ prepare_neovim_environment() {
 main() {
   clear 2>/dev/null || true
   log_header "macOS Development Environment Setup"
+  printf "\n"
+
+  # Validate prerequisites before starting
+  if ! validate_prerequisites; then
+    exit 1
+  fi
+
   printf "\n"
 
   install_xcode_command_line_tools
