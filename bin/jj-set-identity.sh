@@ -1,47 +1,115 @@
 #!/usr/bin/env bash
 
-# Establish a jj user identity policy that mirrors gitdir-scoped git config.
-# This is an explicit, per-repo setter invoked by the maintainer, not magic
-# that silently mutates config on every shell entry.
-
 set -euo pipefail
 
-readonly BOLD=$'\033[1m'
-readonly GREEN=$'\033[32m'
-readonly YELLOW=$'\033[33m'
-readonly RED=$'\033[31m'
-readonly NC=$'\033[0m'
+IFS=$'\n\t'
+
+DRY_RUN=0
+NO_CLEAR=0
+
+for arg in "$@"; do
+  case "$arg" in
+  --dry-run) DRY_RUN=1 ;;
+  --no-clear) NO_CLEAR=1 ;;
+  -h | --help)
+    cat <<'EOF'
+Usage: jj-set-identity.sh [options]
+  --dry-run        Show what would be set, but do not modify repo config
+  --no-clear       Don't clear screen
+EOF
+    exit 0
+    ;;
+  esac
+done
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  GREEN=$'\033[32m'
+  BLUE=$'\033[34m'
+  NC=$'\033[0m'
+else
+  BOLD=""
+  DIM=""
+  GREEN=""
+  BLUE=""
+  NC=""
+fi
+readonly BOLD DIM GREEN BLUE NC
+
+log_header() { printf "\n${BOLD}%s${NC}\n" "$1"; }
+log_success() { printf "${GREEN}✓${NC} %s\n" "$1"; }
+log_step() { printf "${BLUE}→${NC} %s\n" "$1"; }
+log_muted() { printf "${DIM}%s${NC}\n" "$1"; }
+
+handle_exit() { printf "\n"; }
+
+trap handle_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+verify_jj_installed() {
+  log_step "Checking installation"
+  if ! command -v jj >/dev/null 2>&1; then
+    log_muted "Error: jj not found"
+    exit 127
+  fi
+  log_success "Ready"
+}
+
+verify_in_jj_repo() {
+  log_step "Checking repository"
+  if ! jj root >/dev/null 2>&1; then
+    log_muted "Error: Not in a jj repository"
+    exit 1
+  fi
+  log_success "Ready"
+}
+
+set_repo_identity() {
+  log_step "Setting identity"
+
+  local repo_path=""
+  repo_path="$(pwd -P)"
+
+  local name="nvimcraft"
+  local email=""
+  local host=""
+
+  if [[ "$repo_path" == *"/gitea/"* ]]; then
+    host="Gitea"
+    email="nvimcraft@noreply.gitea.com"
+  elif [[ "$repo_path" == *"/github/"* ]]; then
+    host="GitHub"
+    email="260064684+nvimcraft@users.noreply.github.com"
+  else
+    log_muted "No matching git host pattern found"
+    exit 1
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: jj config set --repo user.name \"$name\""
+    log_muted "DRY-RUN: jj config set --repo user.email \"$email\""
+    log_success "Dry run"
+    return 0
+  fi
+
+  jj config set --repo user.name "$name"
+  jj config set --repo user.email "$email"
+  log_success "Set jj identity to $host"
+}
 
 main() {
-  # Refuse to run outside a jj repository to avoid silently writing
-  # config into unexpected locations. This script is deliberately
-  # opinionated: it only ever touches the active repo.
-  if ! jj log -r '@' >/dev/null 2>&1; then
-    printf "%s✗%s %sNot in a jj repository%s\n" \
-      "$RED" "$NC" "$BOLD" "$NC"
-    exit 1
-  fi
+  if [[ "$NO_CLEAR" -eq 0 && -t 1 ]]; then clear || true; fi
 
-  # Derive identity from the repository’s location on disk rather than
-  # from remote URLs. This keeps the rule surface simple and mirrors the
-  # gitdir-based strategy used in .gitconfig.
-  if [[ "$PWD" == *"/gitea/"* ]]; then
-    jj config set --repo user.name "nvimcraft"
-    jj config set --repo user.email "nvimcraft@noreply.gitea.com"
-    printf "%s✓%s %sSet jj identity to Gitea%s\n" \
-      "$GREEN" "$NC" "$BOLD" "$NC"
-  elif [[ "$PWD" == *"/github/"* ]]; then
-    jj config set --repo user.name "nvimcraft"
-    jj config set --repo user.email "260064684+nvimcraft@users.noreply.github.com"
-    printf "%s✓%s %sSet jj identity to GitHub%s\n" \
-      "$GREEN" "$NC" "$BOLD" "$NC"
-  else
-    # Fail loudly when the path does not match a known host namespace so
-    # we do not accidentally leave a repo with a stale or incorrect identity.
-    printf "%s○%s %sNo matching git host pattern found%s\n" \
-      "$YELLOW" "$NC" "$BOLD" "$NC"
-    exit 1
-  fi
+  log_header "JJ Identity"
+  printf "\n"
+
+  verify_jj_installed
+  verify_in_jj_repo
+  set_repo_identity
+
+  printf "\n%s✓%s %sComplete%s\n" "$GREEN" "$NC" "$DIM" "$NC"
 }
 
 main "$@"

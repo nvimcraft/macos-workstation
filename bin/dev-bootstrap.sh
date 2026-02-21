@@ -1,394 +1,516 @@
 #!/usr/bin/env bash
 
-# nvimcraft macOS development environment bootstrap
-
-# Exit on error, unset variables, or failed pipelines.
 set -euo pipefail
 
-# Enable DEBUG mode if set
-if [[ "${DEBUG:-0}" == "1" ]]; then
+IFS=$'\n\t'
+
+NO_SPINNER=0
+NO_CLEAR=0
+DRY_RUN=0
+DEBUG_FLAG=0
+
+DOTFILES_DIRECTORY="${DOTFILES_DIRECTORY:-$HOME/dotfiles-macos}"
+DOTFILES_REPOSITORY_URL="${DOTFILES_REPO:-https://github.com/nvimcraft/dotfiles-macos.git}"
+
+WORKSTATION_DIRECTORY="${WORKSTATION_DIRECTORY:-$HOME/Developer/projects/github/macos-workstation}"
+WORKSTATION_REPOSITORY_URL="${WORKSTATION_REPO:-https://github.com/nvimcraft/macos-workstation.git}"
+
+for arg in "$@"; do
+  case "$arg" in
+  --no-spinner) NO_SPINNER=1 ;;
+  --no-clear) NO_CLEAR=1 ;;
+  --dry-run) DRY_RUN=1 ;;
+  --debug) DEBUG_FLAG=1 ;;
+  -h | --help)
+    cat <<'EOF'
+Usage: dev-bootstrap.sh [options]
+  --dry-run      Show what would be done, but do not make changes
+  --no-spinner   Disable spinner
+  --no-clear     Don't clear screen
+  --debug        Enable shell tracing (set -x)
+EOF
+    exit 0
+    ;;
+  esac
+done
+
+if [[ "${DEBUG:-0}" == "1" || "$DEBUG_FLAG" -eq 1 ]]; then
   set -x
 fi
 
-# Output formatting
-readonly BOLD=$'\033[1m'
-readonly DIM=$'\033[2m'
-readonly GREEN=$'\033[32m'
-readonly BLUE=$'\033[34m'
-readonly YELLOW=$'\033[33m'
-readonly RED=$'\033[31m'
-readonly NC=$'\033[0m'
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  GREEN=$'\033[32m'
+  BLUE=$'\033[34m'
+  NC=$'\033[0m'
+else
+  BOLD=""
+  DIM=""
+  GREEN=""
+  BLUE=""
+  NC=""
+  NO_SPINNER=1
+fi
+readonly BOLD DIM GREEN BLUE NC
 
-# Target directory for dotfiles repository
-readonly DOTFILES_DIRECTORY="$HOME/dotfiles-macos"
+readonly DOTFILES_DIRECTORY DOTFILES_REPOSITORY_URL
+readonly WORKSTATION_DIRECTORY WORKSTATION_REPOSITORY_URL
+readonly DRY_RUN
 
-# Override via DOTFILES_REPO if needed
-readonly DOTFILES_REPOSITORY_URL="${DOTFILES_REPO:-https://github.com/nvimcraft/dotfiles-macos.git}"
-
-# Status output and progress indication
-
-# PID of the active spinner process (if any)
 SPINNER_PID=""
 
-# Start a non-blocking spinner with a status message.
 start_spinner() {
+  [[ "$NO_SPINNER" -eq 1 ]] && return 0
   local status_text="$1"
-  local spinner_frames="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
 
   {
     while true; do
-      for ((i = 0; i < ${#spinner_frames}; i++)); do
-        printf "\r${DIM}${spinner_frames:$i:1}${NC} %s" "$status_text"
+      for frame in "${frames[@]}"; do
+        printf "\r%s%s%s %s" "$DIM" "$frame" "$NC" "$status_text"
         sleep 0.08
       done
     done
   } &
-
   SPINNER_PID=$!
 }
 
-# Stop the active spinner and clean up terminal state.
 stop_spinner() {
-  if [[ -n "$SPINNER_PID" ]]; then
-    kill "$SPINNER_PID" 2>/dev/null &&
-      wait "$SPINNER_PID" 2>/dev/null ||
-      true
+  [[ "$NO_SPINNER" -eq 1 ]] && return 0
+  if [[ -n "${SPINNER_PID:-}" ]]; then
+    kill "$SPINNER_PID" 2>/dev/null || true
+    wait "$SPINNER_PID" 2>/dev/null || true
     SPINNER_PID=""
   fi
-
-  # Clear spinner line
   printf "\r\033[K"
 }
 
-# Structured logging helpers
-log_header() {
-  printf "\n${BOLD}%s${NC}\n" "$1"
-}
+log_header() { printf "\n${BOLD}%s${NC}\n" "$1"; }
+log_success() { printf "${GREEN}✓${NC} %s\n" "$1"; }
+log_step() { printf "${BLUE}→${NC} %s\n" "$1"; }
+log_muted() { printf "${DIM}%s${NC}\n" "$1"; }
 
-log_success() {
-  printf "${GREEN}✓${NC} %s\n" "$1"
-}
-
-log_step() {
-  printf "${BLUE}→${NC} %s\n" "$1"
-}
-
-log_skip() {
-  printf "${YELLOW}○${NC} %s\n" "$1"
-}
-
-log_error() {
-  printf "${RED}✗${NC} %s\n" "$1"
-}
-
-log_muted() {
-  printf "${DIM}%s${NC}\n" "$1"
-}
-
-# Ensure spinner cleanup on exit or interruption.
 handle_exit() {
   stop_spinner
   printf "\n"
 }
 
-trap handle_exit EXIT INT TERM
+# Avoid double-firing
+trap handle_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# Validate system prerequisites before installation
+run_cmd() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: $*"
+    return 0
+  fi
+  "$@"
+}
+
+require_macos() {
+  log_step "Checking platform"
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    log_muted "Error: This bootstrap script is intended for macOS (Darwin) only"
+    exit 1
+  fi
+  log_success "Ready"
+}
+
 validate_prerequisites() {
-  log_step "Validating system prerequisites"
+  log_step "Checking prerequisites"
 
-  # Check if home directory is writable
   if [[ ! -w "$HOME" ]]; then
-    log_error "Home directory is not writable: $HOME"
-    return 1
-  fi
-
-  # Check if curl is available (required for Homebrew installation)
-  if ! command -v curl &>/dev/null; then
-    log_error "curl is required but not found. Please install curl first."
-    return 1
-  fi
-
-  log_success "System prerequisites validated"
-  return 0
-}
-
-# System prerequisites
-
-# Ensure Xcode Command Line Tools are installed.
-install_xcode_command_line_tools() {
-  log_step "Ensuring Xcode command line tools are installed"
-
-  # Fast path, tools already present
-  if xcode-select -p &>/dev/null; then
-    log_skip "Xcode command line tools already installed"
-    return
-  fi
-
-  # Trigger installation prompt (macOS-managed)
-  start_spinner "Installing Xcode CLI tools (this may take several minutes)"
-  xcode-select --install 2>/dev/null || true
-
-  # Block until installation completes.
-  # There is no reliable event hook, so we poll for availability.
-  while ! xcode-select -p &>/dev/null; do
-    sleep 10
-  done
-
-  stop_spinner
-  log_success "Xcode command line tools installed"
-}
-
-# Install and configure Homebrew.
-# Handles both Apple Silicon and Intel macOS layouts.
-install_homebrew_package_manager() {
-  local system_architecture
-  local homebrew_prefix
-
-  system_architecture="$(uname -m)"
-  homebrew_prefix="/opt/homebrew"
-
-  # Intel Macs use a legacy Homebrew prefix
-  if [[ "$system_architecture" != "arm64" ]]; then
-    homebrew_prefix="/usr/local"
-  fi
-
-  log_step "Ensuring Homebrew package manager is installed"
-
-  if command -v brew &>/dev/null; then
-    log_skip "Homebrew package manager already installed"
-    return
-  fi
-
-  start_spinner "Downloading and installing Homebrew"
-
-  # Use the official Homebrew installer
-  if /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
-    stop_spinner
-
-    # Validate installation explicitly
-    if command -v brew &>/dev/null; then
-      log_success "Homebrew package manager installed"
-    else
-      log_muted "Homebrew installation completed, but 'brew' command was not found"
-      exit 1
-    fi
-  else
-    stop_spinner
-    log_muted "Failed to install Homebrew package manager"
+    log_muted "Error: Home directory is not writable: $HOME"
     exit 1
   fi
 
-  # Homebrew shell integration
-  log_step "Configuring Homebrew shell environment"
-
-  if ! grep -q "brew shellenv" "$HOME/.zprofile" 2>/dev/null; then
-    echo "eval \"\$($homebrew_prefix/bin/brew shellenv)\"" >>"$HOME/.zprofile"
-    log_success "Added Homebrew shell initialization to ~/.zprofile"
-  else
-    log_skip "Homebrew shell environment already configured"
+  if ! command -v curl >/dev/null 2>&1; then
+    log_muted "Error: curl is required but not found"
+    exit 1
   fi
 
-  # Load Homebrew into the current process.
-  # This avoids requiring a terminal restart during setup.
-  eval "$($homebrew_prefix/bin/brew shellenv)"
-  export PATH
+  if ! command -v git >/dev/null 2>&1; then
+    log_muted "Note: git not found yet (will be available after Xcode CLT install)"
+  fi
 
-  # Disable Homebrew analytics
-  log_step "Disabling Homebrew analytics"
-  brew analytics off >/dev/null 2>&1
-  log_success "Homebrew analytics disabled"
+  log_success "Ready"
 }
 
-# Install baseline CLI tools used across this development environment.
-install_command_line_packages() {
-  local cli_package_names=(
+install_xcode_command_line_tools() {
+  log_step "Ensuring Xcode command line tools are installed"
+
+  if xcode-select -p >/dev/null 2>&1; then
+    log_success "Already installed"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_success "Dry run"
+    return 0
+  fi
+
+  start_spinner "Triggering Xcode CLI tools installer prompt"
+  xcode-select --install >/dev/null 2>&1 || true
+  stop_spinner
+
+  start_spinner "Waiting for Xcode CLI tools to become available"
+  local attempts=0
+  until xcode-select -p >/dev/null 2>&1; do
+    ((attempts += 1))
+    if ((attempts > 120)); then
+      stop_spinner
+      log_muted "Error: Xcode CLI tools not detected after waiting. Install manually then re-run."
+      exit 1
+    fi
+    sleep 5
+  done
+  stop_spinner
+
+  log_success "Installed"
+}
+
+detect_homebrew_prefix() {
+  if command -v brew >/dev/null 2>&1; then
+    brew --prefix
+    return 0
+  fi
+
+  if [[ "$(uname -m)" == "arm64" ]]; then
+    printf "%s" "/opt/homebrew"
+  else
+    printf "%s" "/usr/local"
+  fi
+}
+
+install_homebrew() {
+  log_step "Ensuring Homebrew is installed"
+
+  if command -v brew >/dev/null 2>&1; then
+    log_success "Already installed"
+  else
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log_muted "DRY-RUN: NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+      log_success "Dry run"
+      return 0
+    fi
+
+    log_step "Installing Homebrew"
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    log_success "Installer completed"
+  fi
+
+  local homebrew_prefix=""
+  homebrew_prefix="$(detect_homebrew_prefix)"
+
+  log_step "Configuring Homebrew shell environment"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: eval \"\$(${homebrew_prefix}/bin/brew shellenv)\""
+    log_muted "DRY-RUN: append brew shellenv to ~/.zprofile if missing"
+    log_muted "DRY-RUN: brew analytics off"
+    log_success "Dry run"
+    return 0
+  fi
+
+  if [[ -x "${homebrew_prefix}/bin/brew" ]]; then
+    eval "$("${homebrew_prefix}/bin/brew" shellenv)"
+  else
+    eval "$(brew shellenv)"
+  fi
+
+  if ! grep -q "brew shellenv" "$HOME/.zprofile" 2>/dev/null; then
+    echo "eval \"\$(${homebrew_prefix}/bin/brew shellenv)\"" >>"$HOME/.zprofile"
+    log_success "Added to ~/.zprofile"
+  else
+    log_success "Already configured in ~/.zprofile"
+  fi
+
+  log_step "Disabling Homebrew analytics"
+  brew analytics off >/dev/null 2>&1 || true
+  log_success "Disabled"
+}
+
+install_cli_packages() {
+  local cli_packages=(
     stow node git gh neovim tmux
     go python
     ripgrep bat eza tree tlrc zoxide delta
     powerlevel10k zsh-autosuggestions zsh-syntax-highlighting
   )
 
-  log_step "Installing command line packages via Homebrew"
-  start_spinner "Installing CLI tools and development utilities"
+  log_step "Installing command line packages"
 
-  local packages_to_install=()
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: brew install ${cli_packages[*]}"
+    log_success "Dry run"
+    return 0
+  fi
 
-  # Collect packages that need to be installed
-  for package_name in "${cli_package_names[@]}"; do
-    if ! brew list "$package_name" >/dev/null 2>&1; then
-      packages_to_install+=("$package_name")
+  start_spinner "Resolving missing CLI tools"
+  local missing=()
+  for p in "${cli_packages[@]}"; do
+    if ! brew list "$p" >/dev/null 2>&1; then
+      missing+=("$p")
     fi
   done
-
   stop_spinner
 
-  # Install all missing packages at once for efficiency
-  if [[ ${#packages_to_install[@]} -gt 0 ]]; then
-    start_spinner "Installing ${#packages_to_install[@]} CLI tools"
-    brew install "${packages_to_install[@]}" >/dev/null 2>&1
+  if ((${#missing[@]} > 0)); then
+    start_spinner "Installing ${#missing[@]} CLI tool(s)"
+    brew install "${missing[@]}" >/dev/null 2>&1
     stop_spinner
-    log_success "Installed ${#packages_to_install[@]} command line packages"
+    log_success "Installed ${#missing[@]} package(s)"
   else
-    log_skip "All command line packages already installed"
+    log_success "Already installed"
   fi
 }
 
-# Install Nerd Fonts
 install_nerd_fonts() {
-  local nerd_font_names=(
-    font-lilex-nerd-font
-  )
+  local nerd_fonts=(font-lilex-nerd-font)
 
-  log_step "Installing Nerd Fonts for terminal"
-  start_spinner "Installing programming fonts with icon support"
+  log_step "Installing Nerd Fonts"
 
-  local fonts_to_install=()
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: brew tap homebrew/cask-fonts"
+    log_muted "DRY-RUN: brew install --cask ${nerd_fonts[*]}"
+    log_success "Dry run"
+    return 0
+  fi
 
-  # Collect fonts that need to be installed
-  for font_name in "${nerd_font_names[@]}"; do
-    if ! brew list --cask "$font_name" >/dev/null 2>&1; then
-      fonts_to_install+=("$font_name")
+  brew tap homebrew/cask-fonts >/dev/null 2>&1 || true
+
+  start_spinner "Resolving missing Nerd Fonts"
+  local missing=()
+  for f in "${nerd_fonts[@]}"; do
+    if ! brew list --cask "$f" >/dev/null 2>&1; then
+      missing+=("$f")
     fi
   done
-
   stop_spinner
 
-  # Install all missing fonts at once for efficiency
-  if [[ ${#fonts_to_install[@]} -gt 0 ]]; then
-    start_spinner "Installing ${#fonts_to_install[@]} Nerd Fonts"
-    brew install --cask "${fonts_to_install[@]}" >/dev/null 2>&1
+  if ((${#missing[@]} > 0)); then
+    start_spinner "Installing ${#missing[@]} Nerd Font(s)"
+    brew install --cask "${missing[@]}" >/dev/null 2>&1
     stop_spinner
-    log_success "Installed ${#fonts_to_install[@]} Nerd Fonts"
+    log_success "Installed ${#missing[@]} Nerd Font(s)"
   else
-    log_skip "All Nerd Fonts already installed"
+    log_success "Already installed"
   fi
 }
 
-# Dotfiles repository management
-clone_dotfiles_repository() {
-  # Skip cloning if already inside the correct dotfiles repository
-  if git rev-parse --git-dir >/dev/null 2>&1; then
-    local current_remote
-    current_remote="$(git remote get-url origin 2>/dev/null || echo "")"
+clone_or_update_repo() {
+  local repo_url="$1"
+  local target_dir="$2"
+  local label="$3"
 
-    if [[ "$current_remote" == *"$DOTFILES_REPOSITORY_URL"* ]] ||
-      [[ "$current_remote" == *"$DOTFILES_REPO"* ]]; then
-      log_skip "Already in the correct dotfiles-macos repository"
-      return
+  if [[ -d "${target_dir}/.git" ]]; then
+    log_step "Updating $label"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      log_muted "DRY-RUN: git -C \"$target_dir\" pull --ff-only"
+      log_success "Dry run"
+      return 0
     fi
-  fi
-
-  # Skip cloning if target directory exists and points to the correct repo
-  if [[ -d "$DOTFILES_DIRECTORY" ]] && [[ -d "$DOTFILES_DIRECTORY/.git" ]]; then
-    pushd "$DOTFILES_DIRECTORY" >/dev/null 2>&1 || return
-
-    local existing_remote
-    existing_remote="$(git remote get-url origin 2>/dev/null || echo "")"
-
-    popd >/dev/null 2>&1 || return
-
-    if [[ "$existing_remote" == *"$DOTFILES_REPOSITORY_URL"* ]] ||
-      [[ "$existing_remote" == *"$DOTFILES_REPO"* ]]; then
-      log_skip "dotfiles-macos repository directory already exists and is correct"
-      return
-    else
-      log_muted "Warning: $DOTFILES_DIRECTORY exists but is not the expected repository"
-      log_muted "Skipping clone to avoid overwriting local data"
-      return
-    fi
-  fi
-
-  # Repository does not exist locally — clone it.
-  log_step "Cloning dotfiles-macos repository from GitHub"
-  start_spinner "Downloading configuration files from $DOTFILES_REPOSITORY_URL"
-
-  if git clone "$DOTFILES_REPOSITORY_URL" "$DOTFILES_DIRECTORY" >/dev/null 2>&1; then
+    start_spinner "Pulling latest changes"
+    git -C "$target_dir" pull --ff-only >/dev/null 2>&1 || true
     stop_spinner
-    log_success "Successfully cloned dotfiles-macos repository"
-  else
-    stop_spinner
-    log_error "Failed to clone dotfiles-macos repository"
-    exit 1
+    log_success "Updated"
+    return 0
   fi
+
+  if [[ -d "$target_dir" ]]; then
+    log_muted "Warning: $target_dir exists but is not a git repo; skipping clone to avoid overwriting."
+    return 0
+  fi
+
+  log_step "Cloning $label"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: git clone \"$repo_url\" \"$target_dir\""
+    log_success "Dry run"
+    return 0
+  fi
+
+  start_spinner "Cloning from remote"
+  git clone "$repo_url" "$target_dir" >/dev/null 2>&1
+  stop_spinner
+  log_success "Cloned"
 }
 
-# Dotfiles linking using GNU Stow
+sync_workstation_scripts_into_dotfiles() {
+  log_step "Syncing workstation scripts into dotfiles"
+
+  clone_or_update_repo "$WORKSTATION_REPOSITORY_URL" "$WORKSTATION_DIRECTORY" "macos-workstation"
+
+  local dest="${DOTFILES_DIRECTORY}/scripts"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: mkdir -p \"$dest\""
+    log_muted "DRY-RUN: rsync -a --delete \"${WORKSTATION_DIRECTORY}/\" \"${dest}/\""
+    log_success "Dry run"
+    return 0
+  fi
+
+  mkdir -p "$dest"
+
+  start_spinner "Copying scripts into ${dest}"
+  rsync -a --delete "${WORKSTATION_DIRECTORY}/" "${dest}/" >/dev/null 2>&1 || true
+  stop_spinner
+
+  log_success "Synced"
+}
+
+ensure_stow_local_ignore() {
+  local ignore_file="${DOTFILES_DIRECTORY}/.stow-local-ignore"
+
+  if [[ -f "$ignore_file" ]]; then
+    log_success "Already configured"
+    return 0
+  fi
+
+  log_step "Creating .stow-local-ignore"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: write $ignore_file"
+    log_success "Dry run"
+    return 0
+  fi
+
+  cat >"$ignore_file" <<'EOF'
+# Stow ignore patterns (includes common defaults + local-only folders)
+
+# Common defaults
+RCS
+.+,v
+CVS
+.#.+
+.cvsignore
+.svn
+_darcs
+.hg
+.git
+.gitignore
+.gitmodules
+.+~
+#.*#
+^/README.*
+^/LICENSE.*
+^/COPYING
+
+# Local-only / do-not-stow folders for this repo layout
+^/scripts
+^/\.jj
+EOF
+
+  log_success "Created"
+}
+
 link_dotfiles_with_stow() {
+  log_step "Linking dotfiles with Stow"
+
   if [[ ! -d "$DOTFILES_DIRECTORY" ]]; then
-    log_error "dotfiles-macos directory not found at $DOTFILES_DIRECTORY"
+    log_muted "Error: dotfiles directory not found at $DOTFILES_DIRECTORY"
     exit 1
   fi
 
-  log_step "Linking dotfiles-macos configuration files"
-  start_spinner "Creating symbolic links for configuration files"
+  if ! command -v stow >/dev/null 2>&1; then
+    log_muted "Error: stow is required but not found"
+    exit 1
+  fi
 
+  ensure_stow_local_ignore
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: (cd \"$DOTFILES_DIRECTORY\" && stow --target \"$HOME\" -n .)"
+    log_muted "DRY-RUN: (cd \"$DOTFILES_DIRECTORY\" && stow --target \"$HOME\" .)"
+    log_success "Dry run"
+    return 0
+  fi
+
+  start_spinner "Checking for stow conflicts"
   pushd "$DOTFILES_DIRECTORY" >/dev/null 2>&1 || exit 1
-  stow . >/dev/null 2>&1 || true
-  popd >/dev/null 2>&1 || exit 1
+
+  if ! stow --target "$HOME" -n . >/dev/null 2>&1; then
+    stop_spinner
+    popd >/dev/null 2>&1 || true
+    log_muted "Error: Stow conflict detected"
+    log_muted "Run: (cd \"$DOTFILES_DIRECTORY\" && stow --target \"$HOME\" -n .) to see details."
+    exit 1
+  fi
 
   stop_spinner
-  log_success "Successfully linked dotfiles-macos configuration files"
+  start_spinner "Creating symlinks in \$HOME"
 
-  # Refresh bat cache if present
-  if command -v bat &>/dev/null; then
-    start_spinner "Rebuilding bat syntax highlighting cache"
+  if ! stow --target "$HOME" . >/dev/null 2>&1; then
+    stop_spinner
+    popd >/dev/null 2>&1 || true
+    log_muted "Error: Stow failed while creating symlinks"
+    exit 1
+  fi
+
+  popd >/dev/null 2>&1 || exit 1
+  stop_spinner
+
+  log_success "Linked"
+
+  if command -v bat >/dev/null 2>&1; then
+    start_spinner "Rebuilding bat cache"
     bat cache --build >/dev/null 2>&1 || true
     stop_spinner
-    log_success "Successfully rebuilt bat cache"
+    log_success "Rebuilt bat cache"
   fi
 }
 
-# Script permissions
 make_scripts_executable() {
-  local scripts_directory="$DOTFILES_DIRECTORY/scripts"
+  local scripts_dir="${DOTFILES_DIRECTORY}/scripts"
 
-  if [[ ! -d "$scripts_directory" ]]; then
-    log_skip "dotfiles-macos scripts directory not found"
-    return
+  log_step "Making scripts executable"
+
+  if [[ ! -d "$scripts_dir" ]]; then
+    log_success "No scripts directory"
+    return 0
   fi
 
-  log_step "Making dotfiles-macos scripts executable"
-  start_spinner "Setting execute permissions on shell scripts"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: chmod +x \"${scripts_dir}\"/*.sh"
+    log_success "Dry run"
+    return 0
+  fi
 
-  chmod +x "$scripts_directory"/*.sh 2>/dev/null || true
-
+  start_spinner "Setting execute permissions on *.sh"
+  chmod +x "${scripts_dir}"/*.sh >/dev/null 2>&1 || true
   stop_spinner
-  log_success "Successfully made dotfiles-macos scripts executable"
+  log_success "Done"
 }
 
-# Editor environment
 prepare_neovim_environment() {
-  log_step "Preparing Neovim development environment"
-  log_success "Neovim environment ready (launch nvim to install plugins)"
+  log_step "Preparing Neovim environment"
+  log_success "Ready"
 }
 
-# Entry point
 main() {
-  clear 2>/dev/null || true
+  if [[ "$NO_CLEAR" -eq 0 && -t 1 ]]; then clear || true; fi
+
   log_header "macOS Development Environment Setup"
   printf "\n"
 
-  # Validate prerequisites before starting
-  if ! validate_prerequisites; then
-    exit 1
-  fi
+  require_macos
+  validate_prerequisites
 
   printf "\n"
 
   install_xcode_command_line_tools
-  install_homebrew_package_manager
-  install_command_line_packages
+  install_homebrew
+  install_cli_packages
   install_nerd_fonts
-  clone_dotfiles_repository
+
+  clone_or_update_repo "$DOTFILES_REPOSITORY_URL" "$DOTFILES_DIRECTORY" "dotfiles-macos"
+  sync_workstation_scripts_into_dotfiles
+
   link_dotfiles_with_stow
   make_scripts_executable
   prepare_neovim_environment
 
-  printf "\n"
-  log_header "macOS Development Environment Setup Complete"
-  printf "\n%s✓%s %sDevelopment environment ready for use%s\n" \
-    "$GREEN" "$NC" "$DIM" "$NC"
+  printf "\n%s✓%s %sComplete%s\n" "$GREEN" "$NC" "$DIM" "$NC"
 }
 
 main "$@"

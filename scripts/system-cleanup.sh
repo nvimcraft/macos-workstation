@@ -1,27 +1,62 @@
 #!/usr/bin/env bash
 
-# nvimcraft macOS system cleanup script
-
 set -euo pipefail
 
-readonly BOLD=$'\033[1m'
-readonly DIM=$'\033[2m'
-readonly GREEN=$'\033[32m'
-readonly BLUE=$'\033[34m'
-readonly NC=$'\033[0m'
+IFS=$'\n\t'
+
+DRY_RUN=0
+KEEP_HISTORY=0
+NO_SPINNER=0
+NO_CLEAR=0
+
+for arg in "$@"; do
+  case "$arg" in
+  --dry-run) DRY_RUN=1 ;;
+  --keep-history) KEEP_HISTORY=1 ;;
+  --no-spinner) NO_SPINNER=1 ;;
+  --no-clear) NO_CLEAR=1 ;;
+  -h | --help)
+    cat <<'EOF'
+Usage: system-cleanup.sh [options]
+  --dry-run        Show what would be removed, but do not delete anything
+  --keep-history   Do not remove shell history files (~/.zsh_history, ~/.bash_history, etc.)
+  --no-spinner     Disable spinner
+  --no-clear       Don't clear screen
+EOF
+    exit 0
+    ;;
+  esac
+done
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  GREEN=$'\033[32m'
+  BLUE=$'\033[34m'
+  NC=$'\033[0m'
+else
+  BOLD=""
+  DIM=""
+  GREEN=""
+  BLUE=""
+  NC=""
+  NO_SPINNER=1
+fi
+readonly BOLD DIM GREEN BLUE NC
 
 SPINNER_PID=""
 ITEMS_CLEANED=0
 ITEMS_SKIPPED=0
 
 start_spinner() {
+  [[ "$NO_SPINNER" -eq 1 ]] && return 0
   local status_text="$1"
-  local spinner_frames="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
 
   {
     while true; do
-      for ((i = 0; i < ${#spinner_frames}; i++)); do
-        printf "\r${DIM}${spinner_frames:$i:1}${NC} %s" "$status_text"
+      for frame in "${frames[@]}"; do
+        printf "\r%s%s%s %s" "$DIM" "$frame" "$NC" "$status_text"
         sleep 0.08
       done
     done
@@ -30,28 +65,19 @@ start_spinner() {
 }
 
 stop_spinner() {
-  if [[ -n "$SPINNER_PID" ]]; then
-    kill "$SPINNER_PID" 2>/dev/null && wait "$SPINNER_PID" 2>/dev/null || true
+  [[ "$NO_SPINNER" -eq 1 ]] && return 0
+  if [[ -n "${SPINNER_PID:-}" ]]; then
+    kill "$SPINNER_PID" 2>/dev/null || true
+    wait "$SPINNER_PID" 2>/dev/null || true
     SPINNER_PID=""
   fi
   printf "\r\033[K"
 }
 
-log_header() {
-  printf "\n${BOLD}%s${NC}\n" "$1"
-}
-
-log_success() {
-  printf "${GREEN}✓${NC} %s\n" "$1"
-}
-
-log_step() {
-  printf "${BLUE}→${NC} %s\n" "$1"
-}
-
-log_muted() {
-  printf "${DIM}%s${NC}\n" "$1"
-}
+log_header() { printf "\n${BOLD}%s${NC}\n" "$1"; }
+log_success() { printf "${GREEN}✓${NC} %s\n" "$1"; }
+log_step() { printf "${BLUE}→${NC} %s\n" "$1"; }
+log_muted() { printf "${DIM}%s${NC}\n" "$1"; }
 
 print_summary() {
   log_header "Summary"
@@ -64,7 +90,41 @@ handle_exit() {
   printf "\n"
 }
 
-trap handle_exit EXIT INT TERM
+# Avoid double-firing
+trap handle_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+verify_environment_ready() {
+  log_step "Checking environment"
+  # Basic sanity: HOME should exist and be a directory
+  if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
+    log_muted "Error: HOME not set or not a directory"
+    exit 1
+  fi
+  log_success "Ready"
+}
+
+remove_path() {
+  local target_path="$1"
+
+  if [[ ! -e "$target_path" ]]; then
+    ((ITEMS_SKIPPED += 1))
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_muted "DRY-RUN: would remove $target_path"
+    ((ITEMS_CLEANED += 1))
+    return 0
+  fi
+
+  if rm -rf -- "$target_path" 2>/dev/null; then
+    ((ITEMS_CLEANED += 1))
+  else
+    ((ITEMS_SKIPPED += 1))
+  fi
+}
 
 remove_shell_history_files() {
   local shell_history_files=(
@@ -77,15 +137,7 @@ remove_shell_history_files() {
   )
 
   for history_file_path in "${shell_history_files[@]}"; do
-    if [[ -e "$history_file_path" ]]; then
-      if rm -rf "$history_file_path" 2>/dev/null; then
-        ((ITEMS_CLEANED += 1))
-      else
-        ((ITEMS_SKIPPED += 1))
-      fi
-    else
-      ((ITEMS_SKIPPED += 1))
-    fi
+    remove_path "$history_file_path"
   done
 }
 
@@ -98,15 +150,7 @@ remove_editor_temporary_files() {
   )
 
   for editor_temp_path in "${editor_temp_paths[@]}"; do
-    if [[ -e "$editor_temp_path" ]]; then
-      if rm -rf "$editor_temp_path" 2>/dev/null; then
-        ((ITEMS_CLEANED += 1))
-      else
-        ((ITEMS_SKIPPED += 1))
-      fi
-    else
-      ((ITEMS_SKIPPED += 1))
-    fi
+    remove_path "$editor_temp_path"
   done
 }
 
@@ -119,15 +163,7 @@ remove_package_manager_caches() {
   )
 
   for cache_directory_path in "${package_cache_directories[@]}"; do
-    if [[ -e "$cache_directory_path" ]]; then
-      if rm -rf "$cache_directory_path" 2>/dev/null; then
-        ((ITEMS_CLEANED += 1))
-      else
-        ((ITEMS_SKIPPED += 1))
-      fi
-    else
-      ((ITEMS_SKIPPED += 1))
-    fi
+    remove_path "$cache_directory_path"
   done
 }
 
@@ -138,15 +174,7 @@ remove_homebrew_cache_and_logs() {
   )
 
   for homebrew_cache_path in "${homebrew_cache_paths[@]}"; do
-    if [[ -e "$homebrew_cache_path" ]]; then
-      if rm -rf "$homebrew_cache_path" 2>/dev/null; then
-        ((ITEMS_CLEANED += 1))
-      else
-        ((ITEMS_SKIPPED += 1))
-      fi
-    else
-      ((ITEMS_SKIPPED += 1))
-    fi
+    remove_path "$homebrew_cache_path"
   done
 }
 
@@ -158,23 +186,20 @@ remove_system_cache_and_metadata() {
   )
 
   for system_cache_path in "${system_cache_paths[@]}"; do
-    if [[ -e "$system_cache_path" ]]; then
-      if rm -rf "$system_cache_path" 2>/dev/null; then
-        ((ITEMS_CLEANED += 1))
-      else
-        ((ITEMS_SKIPPED += 1))
-      fi
-    else
-      ((ITEMS_SKIPPED += 1))
-    fi
+    remove_path "$system_cache_path"
   done
 }
 
-execute_system_cleanup() {
-  log_step "Removing cache and temporary files"
-  start_spinner "Cleaning shell history, editor files, and package caches"
+cleanup_environment() {
+  log_step "Cleaning up"
+  start_spinner "Removing cache and temporary files"
 
-  remove_shell_history_files
+  if [[ "$KEEP_HISTORY" -eq 0 ]]; then
+    remove_shell_history_files
+  else
+    log_muted "Skipping shell history files"
+  fi
+
   remove_editor_temporary_files
   remove_package_manager_caches
   remove_homebrew_cache_and_logs
@@ -182,24 +207,25 @@ execute_system_cleanup() {
 
   stop_spinner
 
-  if [[ "$ITEMS_CLEANED" -eq 0 ]]; then
-    log_success "System already clean"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_success "Dry run"
   else
-    log_success "Removed $ITEMS_CLEANED items"
+    log_success "Clean"
   fi
 }
 
 main() {
-  clear
+  if [[ "$NO_CLEAR" -eq 0 && -t 1 ]]; then clear || true; fi
+
   log_header "System Cleanup"
   printf "\n"
 
-  execute_system_cleanup
+  verify_environment_ready
+  cleanup_environment
 
   printf "\n"
   print_summary
-  printf "\n%s✓%s %sComplete%s\n" \
-    "$GREEN" "$NC" "$DIM" "$NC"
+  printf "\n%s✓%s %sComplete%s\n" "$GREEN" "$NC" "$DIM" "$NC"
 }
 
 main "$@"
